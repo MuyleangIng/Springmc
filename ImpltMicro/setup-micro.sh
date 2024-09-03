@@ -122,7 +122,7 @@ EOF
 }
 
 # Create Eureka Server
-create_project "eureka-server" "EurekaServerApplication" "implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-server'"
+create_project "eureka-server" "EurekaDiscoveryServer" "implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-server'"
 
 # Create Config Server
 create_project "config-server" "ConfigServerApplication" "implementation 'org.springframework.cloud:spring-cloud-config-server'
@@ -131,7 +131,8 @@ create_project "config-server" "ConfigServerApplication" "implementation 'org.sp
 # Create API Gateway
 create_project "api-gateway" "ApiGatewayApplication" "implementation 'org.springframework.cloud:spring-cloud-starter-gateway'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
-    implementation 'org.springframework.cloud:spring-cloud-starter-config'"
+    implementation 'org.springframework.cloud:spring-cloud-starter-config'
+    runtimeOnly 'io.netty:netty-resolver-dns-native-macos:4.1.76.Final"
 
 # Create User Service
 create_project "user-service" "UserServiceApplication" "implementation 'org.springframework.boot:spring-boot-starter-web'
@@ -142,17 +143,70 @@ create_project "user-service" "UserServiceApplication" "implementation 'org.spri
 
 # Configure Eureka Server
 cat << EOF > eureka-server/src/main/resources/application.yml
+spring:
+  application:
+    name: eureka-server
+  profiles:
+    active: dev
+  cloud:
+    config:
+      enabled: true
 server:
   port: 8761
 
 eureka:
+  instance:
+    hostname: localhost
   client:
-    register-with-eureka: false
-    fetch-registry: false
+    registerWithEureka: false
+    fetchRegistry: false
+    serviceUrl:
+      defaultZone: http://${eureka.instance.hostname}:${server.port}/eureka/
+  server:
+    waitTimeInMsWhenSyncEmpty: 0
+    response-cache-update-interval-ms: 5000
 
+---
+#spring:
+#  config:
+#    activate:
+#      on-profile: dev
 spring:
-  application:
-    name: eureka-server
+  config:
+    activate:
+      on-profile: dev
+
+# Dev profile keeps default settings
+management:
+  endpoints:
+    web:
+      exposure:
+        include: '*'
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  jersey:
+    application-path: /eureka/nowhere
+
+eureka:
+  dashboard:
+    enabled: false
+  server:
+    enableSelfPreservation: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: ''
+  endpoint:
+    health:
+      enabled: false
+    info:
+      enabled: false
 EOF
 
 # Configure Config Server
@@ -163,12 +217,17 @@ server:
 spring:
   application:
     name: config-server
+  profiles:
+    active: git,native
   cloud:
     config:
       server:
         git:
-          uri: https://github.com/your-username/your-config-repo.git
+          uri: https://github.com/MuyleangIng/config-server.git
           default-label: main
+          clone-on-start: true
+        native:
+          search-locations: classpath:/config
 
 eureka:
   client:
@@ -190,13 +249,20 @@ spring:
         locator:
           enabled: true
           lower-case-service-id: true
-    config:
-      uri: http://localhost:8888
+      routes:
+        - id: user-service
+          uri: http://127.0.0.1:8081  # Point directly to localhost for testing
+          predicates:
+            - Path=/users/**
+          filters:
+            - RewritePath=/users/(?<segment>.*), /${segment}
+  config:
+    import: optional:configserver:http://127.0.0.1:8888
 
 eureka:
   client:
     serviceUrl:
-      defaultZone: http://localhost:8761/eureka/
+      defaultZone: http://127.0.0.1:8761/eureka/
 EOF
 
 # Configure User Service
@@ -205,31 +271,31 @@ server:
   port: 8081
 
 spring:
-  application:
-    name: user-service
-  cloud:
-    config:
-      uri: http://localhost:8888
-  datasource:
-    url: jdbc:postgresql://localhost:5432/userdb
-    username: your_postgres_username
-    password: your_postgres_password
-  jpa:
-    hibernate:
-      ddl-auto: update
-
+ config:
+   activate:
+     on-profile: prod
+   import: optional:configserver:http://localhost:8888
+ datasource:
+   url: jdbc:postgresql://localhost:5432/postgres
+   username: admin
+   password: admin@123
+ jpa:
+   hibernate:
+     ddl-auto: validate
+server:
+ port: 8081
 eureka:
-  client:
-    serviceUrl:
-      defaultZone: http://localhost:8761/eureka/
+ client:
+   serviceUrl:
+     defaultZone: http://localhost:8761/eureka/
 EOF
 
 # Update main application classes
 sed -i.bak '/@SpringBootApplication/a\
 import org.springframework.cloud.netflix.eureka.server.EnableEurekaServer;\
 \
-@EnableEurekaServer' eureka-server/src/main/java/com/example/eurekaserver/EurekaServerApplication.java
-rm eureka-server/src/main/java/com/example/eurekaserver/EurekaServerApplication.java.bak
+@EnableEurekaServer' eureka-server/src/main/java/com/example/eurekaserver/EurekaDiscoveryServer.java
+rm eureka-server/src/main/java/com/example/eurekaserver/EurekaDiscoveryServer.java.bak
 
 sed -i.bak '/@SpringBootApplication/a\
 import org.springframework.cloud.config.server.EnableConfigServer;\
@@ -245,8 +311,10 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Table;
 
 @Entity
+@Table(name = "users") // Specify the new table name here
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -262,6 +330,7 @@ public class User {
     public String getEmail() { return email; }
     public void setEmail(String email) { this.email = email; }
 }
+
 EOF
 
 cat << EOF > user-service/src/main/java/com/example/userservice/UserRepository.java
@@ -298,6 +367,7 @@ public class UserController {
         return userRepository.findAll();
     }
 }
+
 EOF
 
 echo "Microservices infrastructure with Config Server and PostgreSQL support has been set up successfully."
